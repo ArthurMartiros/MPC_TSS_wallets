@@ -8,12 +8,28 @@
 #
 #   SEPOLIA_RPC_URL=https://...  scripts/dev.sh   enable Sepolia balances/transactions
 #
+# Settings are read from .env if present (see .env.example); variables set
+# on the command line take precedence over .env.
+#
 # DEVELOPMENT ONLY: fixed tokens and passphrases. Signers run the real
 # policies: the user signer signs only what was reviewed and confirmed on
 # its approval API; server and backup require the user's approval token.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# Load .env without overriding variables already set in the environment.
+if [[ -f .env ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[2]}" value="${BASH_REMATCH[3]}"
+      value="${value%\"}" value="${value#\"}" value="${value%\'}" value="${value#\'}"
+      [[ -z "${!key+x}" ]] && export "$key=$value"
+    fi
+  done < .env
+fi
 
 DATA=${DATA:-./data/dev}
 API_PORT=${API_PORT:-8080}

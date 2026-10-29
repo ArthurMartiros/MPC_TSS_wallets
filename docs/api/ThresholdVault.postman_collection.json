@@ -1,0 +1,306 @@
+{
+  "info": {
+    "name": "ThresholdVault",
+    "description": "REST API of the ThresholdVault 2-of-3 MPC wallet demo (testnet only).\n\nStart the stack with `scripts/dev.sh`, then run the requests top to bottom. \"Create wallet\" stores the new wallet id in the `walletId` collection variable, so the requests after it work without copy-pasting.\n\nThe first wallet takes 10-60 s: each signer generates fresh safe primes. Later wallets take a few seconds.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{apiToken}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8080" },
+    { "key": "apiToken", "value": "dev-api-token" },
+    { "key": "signerToken", "value": "dev-signer-token" },
+    { "key": "userSignerUrl", "value": "http://127.0.0.1:7001" },
+    { "key": "serverSignerUrl", "value": "http://127.0.0.1:7002" },
+    { "key": "backupSignerUrl", "value": "http://127.0.0.1:7003" },
+    { "key": "approvalUrl", "value": "http://127.0.0.1:7101" },
+    { "key": "approvalToken", "value": "dev-approval-token" },
+    { "key": "chain", "value": "ethereum-sepolia" },
+    { "key": "recipient", "value": "0x000000000000000000000000000000000000dEaD" },
+    { "key": "amount", "value": "0.0001" },
+    { "key": "walletId", "value": "" },
+    { "key": "txId", "value": "" },
+    { "key": "unsignedTx", "value": "" },
+    { "key": "sighash", "value": "" },
+    { "key": "approval", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Coordinator",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{baseUrl}}/healthz",
+            "description": "Liveness probe. No token required."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+          ] } }]
+        },
+        {
+          "name": "Signer status",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/signers",
+            "description": "Probes the three signers. `preparams_ready` is how many pre-generated safe-prime sets each signer has; with 0, the next wallet creation is slow."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('all 3 signers reachable', () => {",
+            "  const s = pm.response.json();",
+            "  pm.expect(s).to.have.lengthOf(3);",
+            "  s.forEach(x => pm.expect(x.reachable, x.name + ': ' + (x.error || '')).to.be.true);",
+            "});"
+          ] } }]
+        },
+        {
+          "name": "List chains",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/chains",
+            "description": "Supported testnets and their assets."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('6 chains', () => pm.expect(pm.response.json()).to.have.lengthOf(6));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "Wallets",
+      "item": [
+        {
+          "name": "Create wallet",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/wallets",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"treasury\"\n}" },
+            "description": "Runs distributed key generation across the user, server and backup signers. Each keeps only its own encrypted share; the response contains the joint public key and the wallet's address on every chain. Saves the id to `walletId`."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "const w = pm.response.json();",
+            "pm.collectionVariables.set('walletId', w.id);",
+            "pm.test('compressed public key', () => pm.expect(w.public_key).to.match(/^0[23][0-9a-f]{64}$/));",
+            "pm.test('addresses on 6 chains', () => pm.expect(w.addresses).to.have.lengthOf(6));"
+          ] } }]
+        },
+        {
+          "name": "List wallets",
+          "request": { "method": "GET", "url": "{{baseUrl}}/wallets" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('is a list', () => pm.expect(pm.response.json()).to.be.an('array'));"
+          ] } }]
+        },
+        {
+          "name": "Get wallet",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/wallets/{{walletId}}",
+            "description": "Uses the id saved by \"Create wallet\"."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('same wallet', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('walletId')));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "Transactions",
+      "description": "Full transfer flow. Requires a Sepolia RPC (start with SEPOLIA_RPC_URL=... scripts/dev.sh) and Sepolia ETH in the wallet's ethereum-sepolia address. Set the `recipient` and `amount` collection variables first. Steps 3 and 4 play the USER: they call the user signer's own approval API, which the coordinator cannot access.",
+      "item": [
+        {
+          "name": "1. Wallet balance",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/wallets/{{walletId}}/balance?chain={{chain}}",
+            "description": "Native balance of the wallet. Add &asset=USDC for a token."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "2. Prepare transaction",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/transactions/prepare",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"wallet_id\": \"{{walletId}}\",\n  \"chain\": \"{{chain}}\",\n  \"asset\": \"ETH\",\n  \"to\": \"{{recipient}}\",\n  \"amount\": \"{{amount}}\"\n}" },
+            "description": "Builds an unsigned EIP-1559 transaction with live nonce and fees. Saves txId and unsignedTx."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "const tx = pm.response.json();",
+            "pm.collectionVariables.set('txId', tx.id);",
+            "pm.collectionVariables.set('unsignedTx', tx.unsigned_tx);",
+            "pm.test('status prepared', () => pm.expect(tx.status).to.eql('prepared'));"
+          ] } }]
+        },
+        {
+          "name": "3. USER: review on user signer",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{approvalToken}}", "type": "string" }] },
+            "method": "POST",
+            "url": "{{approvalUrl}}/v1/approvals/review",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"tx_id\": \"{{txId}}\",\n  \"wallet_id\": \"{{walletId}}\",\n  \"chain\": \"{{chain}}\",\n  \"transaction\": \"{{unsignedTx}}\"\n}" },
+            "description": "The user signer decodes the raw transaction ITSELF and returns what will really be signed. Check `summary.to`, `summary.amount_display` and `summary.max_fee_display` before confirming."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const r = pm.response.json();",
+            "pm.collectionVariables.set('sighash', r.summary.sighash);",
+            "pm.test('recipient is what you asked for', () => pm.expect(r.summary.to.toLowerCase()).to.eql(pm.collectionVariables.get('recipient').toLowerCase()));"
+          ] } }]
+        },
+        {
+          "name": "4. USER: confirm on user signer",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{approvalToken}}", "type": "string" }] },
+            "method": "POST",
+            "url": "{{approvalUrl}}/v1/approvals/confirm",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"tx_id\": \"{{txId}}\",\n  \"sighash\": \"{{sighash}}\"\n}" },
+            "description": "The user's explicit approval. Returns an approval token signed by the user signer's identity key. Saves it as `approval`."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('approval', pm.response.json().approval);"
+          ] } }]
+        },
+        {
+          "name": "5. Approve transaction",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/transactions/{{txId}}/approve",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"approval\": \"{{approval}}\"\n}" },
+            "description": "Hands the user's approval token to the coordinator."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('status approved', () => pm.expect(pm.response.json().status).to.eql('approved'));"
+          ] } }]
+        },
+        {
+          "name": "6. Sign transaction",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/transactions/{{txId}}/sign",
+            "description": "2-of-3 threshold signing by the user and server signers. Each independently re-checks the transaction and the approval."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('status signed', () => pm.expect(pm.response.json().status).to.eql('signed'));"
+          ] } }]
+        },
+        {
+          "name": "7. Broadcast transaction",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/transactions/{{txId}}/broadcast",
+            "description": "Sends the signed transaction to the network. The response includes explorer_url."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('status broadcast', () => pm.expect(pm.response.json().status).to.eql('broadcast'));"
+          ] } }]
+        },
+        {
+          "name": "8. Get transaction",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/transactions/{{txId}}",
+            "description": "Refreshes on-chain status: broadcast -> confirmed (or failed) once mined."
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "9. List wallet transactions",
+          "request": { "method": "GET", "url": "{{baseUrl}}/transactions?wallet_id={{walletId}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "Error cases",
+      "item": [
+        {
+          "name": "Wallet not found (404)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/wallets/w_doesnotexist" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('404', () => pm.response.to.have.status(404));"] } }]
+        },
+        {
+          "name": "Empty wallet name (400)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/wallets",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('400', () => pm.response.to.have.status(400));"] } }]
+        },
+        {
+          "name": "Unknown JSON field (400)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/wallets",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"x\",\n  \"foo\": 1\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('400', () => pm.response.to.have.status(400));"] } }]
+        },
+        {
+          "name": "Missing token (401)",
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{baseUrl}}/wallets" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('401', () => pm.response.to.have.status(401));"] } }]
+        }
+      ]
+    },
+    {
+      "name": "Signers (direct)",
+      "description": "Each signer's own API, normally called only by the coordinator. Uses the signer token.",
+      "auth": {
+        "type": "bearer",
+        "bearer": [{ "key": "token", "value": "{{signerToken}}", "type": "string" }]
+      },
+      "item": [
+        {
+          "name": "User signer identity",
+          "request": { "method": "GET", "url": "{{userSignerUrl}}/v1/identity" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"] } }]
+        },
+        {
+          "name": "User signer health",
+          "request": { "method": "GET", "url": "{{userSignerUrl}}/v1/health" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"] } }]
+        },
+        {
+          "name": "Server signer health",
+          "request": { "method": "GET", "url": "{{serverSignerUrl}}/v1/health" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"] } }]
+        },
+        {
+          "name": "Backup signer health",
+          "request": { "method": "GET", "url": "{{backupSignerUrl}}/v1/health" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"] } }]
+        }
+      ]
+    }
+  ]
+}

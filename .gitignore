@@ -1,0 +1,14 @@
+# Build output
+/bin/
+/dist/
+
+# Local runtime data: encrypted shares, SQLite DBs, env files
+/data/
+*.db
+*.db-journal
+.env
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
